@@ -1,0 +1,418 @@
+---
+title: "Analisis Clustering Biji Gandum"
+author: "Jacky Alinson"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    number_sections: true
+  pdf_document:
+    toc: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.align = "center",
+  fig.width = 9,
+  fig.height = 5
+)
+```
+
+---
+
+# Pendahuluan
+
+Dataset **Seeds** merupakan kumpulan data morfometrik biji gandum yang berasal dari tiga varietas berbeda (*Kama*, *Rosa*, dan *Canadian*), masing-masing berjumlah 70 sampel sehingga total terdapat **210 observasi**. Setiap sampel memiliki 7 fitur geometris yang diukur menggunakan teknik sinar-X lunak beresolusi tinggi.
+
+Tujuan analisis ini adalah **membandingkan dua algoritma clustering tanpa pengawasan (*unsupervised*)**, yaitu K-Means dan K-Medoids (PAM), dalam mengelompokkan biji gandum berdasarkan kemiripan fitur morfologisnya tanpa menggunakan label varietas sebagai panduan selama proses clustering.
+
+---
+
+# Load Library & Data
+
+## Library yang Digunakan
+
+```{r library}
+library(cluster)
+library(factoextra)
+library(ggplot2)
+library(gridExtra)
+library(clusterSim)
+library(fpc)
+library(mclust)
+library(pheatmap)
+library(tidyr)
+```
+
+## Import Data
+
+```{r load-data}
+seeds <- read.table(
+  "C:/Users/jackyallea/Downloads/seeds/seeds_dataset.txt",
+  header = FALSE,
+  sep    = "",
+  col.names = c(
+    "area", "perimeter", "compactness",
+    "kernel_length", "kernel_width",
+    "asymmetry_coef", "groove_length",
+    "variety"
+  )
+)
+
+cat("Dimensi Data :", nrow(seeds), "x", ncol(seeds), "\n")
+cat("Missing Value:", sum(is.na(seeds)), "\n")
+```
+
+## Eksplorasi Awal
+
+```{r eksplorasi}
+str(seeds)
+summary(seeds)
+table(seeds$variety)
+```
+
+> **Catatan:** Dataset terdiri dari 210 baris dan 8 kolom. Tidak terdapat nilai hilang (*missing value*). Label varietas (`variety`) berdistribusi **seimbang** dengan masing-masing 70 sampel per kelas kondisi ideal untuk evaluasi clustering.
+
+---
+
+# Preprocessing
+
+Fitur ke-1 hingga ke-7 dipisahkan dari label, kemudian dilakukan **standardisasi (z-score scaling)** agar setiap fitur memiliki skala yang setara. Hal ini penting karena K-Means dan PAM menggunakan jarak Euclidean yang sensitif terhadap perbedaan satuan antar fitur.
+
+```{r preprocessing}
+X        <- seeds[, 1:7]
+X_scaled <- scale(X)
+```
+
+---
+
+# Eksplorasi Distribusi Fitur (Boxplot)
+
+```{r boxplot, fig.height=6, fig.cap="Gambar 1. Distribusi setiap fitur morfologis biji gandum sebelum scaling."}
+par(mfrow = c(2, 4))
+for (col in names(X)) {
+  boxplot(X[[col]], main = col, col = "lightblue")
+}
+par(mfrow = c(1, 1))
+```
+
+**Interpretasi:**
+Sebagian besar fitur (area, perimeter, kernel_length, kernel_width, groove_length) memiliki distribusi yang relatif simetris tanpa pencilan ekstrem. Fitur `asymmetry_coef` menunjukkan distribusi yang lebih miring ke kanan (*right-skewed*) dengan beberapa pencilan di nilai tinggi, mengindikasikan variabilitas asimetri yang lebih besar antar biji. Fitur `compactness` memiliki rentang nilai sangat sempit (0.81–0.92), sehingga standardisasi menjadi penting untuk menghindari dominasi fitur berskala besar.
+
+---
+
+# Penentuan Jumlah Cluster Optimal
+
+## Elbow Method (WSS)
+
+```{r elbow, fig.cap="Gambar 2. Elbow Method — penurunan WSS terhadap jumlah cluster."}
+set.seed(42)
+
+fviz_nbclust(
+  X_scaled, kmeans,
+  method = "wss", k.max = 10
+) +
+  geom_vline(xintercept = 3, linetype = "dashed", color = "red") +
+  labs(title = "Elbow Method", x = "Jumlah Cluster", y = "WSS")
+```
+
+**Interpretasi:**
+Grafik WSS (*Within-Cluster Sum of Squares*) menunjukkan penurunan tajam dari k=1 ke k=2, kemudian melambat secara signifikan mulai k=3. Titik "siku" (*elbow*) terbentuk jelas pada **k=3**, ditandai garis merah putus-putus. Penambahan cluster di atas k=3 tidak memberikan penurunan WSS yang berarti, sehingga k=3 dipilih sebagai jumlah cluster optimal berdasarkan metode ini.
+
+## Silhouette Method
+
+```{r silhouette-method, fig.cap="Gambar 3. Silhouette Method — rata-rata lebar silhouette per jumlah cluster."}
+fviz_nbclust(
+  X_scaled, kmeans,
+  method = "silhouette", k.max = 10
+) +
+  labs(title = "Silhouette Method")
+```
+
+**Interpretasi:**
+Nilai rata-rata silhouette tertinggi diperoleh pada **k=2** (~0.46), lalu turun pada k=3 (~0.40). Meski secara matematis k=2 lebih optimal menurut metode silhouette, k=3 dipilih karena **sesuai dengan jumlah varietas yang diketahui** dari ground truth (3 kelas), serta didukung oleh hasil Elbow Method. Pada k=3, nilai silhouette masih tergolong cukup baik (~0.40), menandakan struktur cluster yang masih dapat diidentifikasi dengan baik.
+
+> **Keputusan:** Jumlah cluster **K = 3** dipilih berdasarkan pertimbangan gabungan antara Elbow Method, Silhouette Method, dan pengetahuan domain (3 varietas gandum).
+
+---
+
+# Proses Clustering
+
+```{r clustering}
+km_result  <- kmeans(X_scaled, centers = 3, nstart = 25, iter.max = 100)
+pam_result <- pam(X_scaled, k = 3)
+
+cat("\nCLUSTER SIZE K-MEANS\n")
+print(km_result$size)
+
+cat("\nCLUSTER SIZE PAM\n")
+print(pam_result$clusinfo[, "size"])
+```
+
+**Interpretasi:**
+K-Means menghasilkan cluster dengan ukuran yang relatif seimbang (67, 71, 72), sedangkan PAM menghasilkan distribusi yang sedikit lebih tidak merata (77, 62, 71). Cluster K-Means yang lebih proporsional konsisten dengan cara kerjanya yang mengoptimalkan pusat cluster secara iteratif, sementara PAM memilih medoid dari data aktual sehingga lebih dipengaruhi oleh kepadatan lokal data.
+
+---
+
+# Visualisasi PCA: Ground Truth vs Hasil Clustering
+
+```{r pca-plot, fig.width=13, fig.height=4, fig.cap="Gambar 4. Perbandingan visualisasi PCA: Ground Truth, K-Means, dan PAM."}
+p0 <- fviz_cluster(
+  list(data = X_scaled, cluster = seeds$variety),
+  ellipse = TRUE, geom = "point",
+  main = "Ground Truth Variety", ggtheme = theme_minimal()
+)
+p1 <- fviz_cluster(
+  km_result, data = X_scaled,
+  ellipse = TRUE, geom = "point",
+  main = "K-Means (K = 3)", ggtheme = theme_minimal()
+)
+p2 <- fviz_cluster(
+  pam_result, data = X_scaled,
+  ellipse = TRUE, geom = "point",
+  main = "PAM (K = 3)", ggtheme = theme_minimal()
+)
+grid.arrange(p0, p1, p2, ncol = 3)
+```
+
+**Interpretasi:**
+Dua komponen utama PCA mampu menjelaskan **89%** total variansi data (Dim1: 71.9%, Dim2: 17.1%). Pada plot *Ground Truth*, terlihat adanya tumpang tindih (*overlap*) antar varietas, terutama antara varietas 1 dan 2 yang menandakan tantangan inheren dalam separasi kelas pada data ini.
+
+Hasil K-Means dan PAM secara visual menghasilkan pola cluster yang **sangat mirip satu sama lain**, dan keduanya mendekati pola ground truth. Cluster yang paling tegas terpisah adalah cluster biji berukuran besar (kanan atas) dan biji berukuran kecil (kiri bawah). Zona overlap terjadi pada cluster biji berukuran sedang, yang memang sulit dipisahkan secara geometris.
+
+---
+
+# Uji Stabilitas Bootstrap K-Means
+
+```{r bootstrap, cache=TRUE}
+set.seed(42)
+boot_km <- clusterboot(
+  X_scaled,
+  B = 100, bootmethod = "boot",
+  clustermethod = kmeansCBI,
+  k = 3, seed = 42
+)
+
+cat("\nBOOTSTRAP STABILITY K-MEANS\n")
+print(round(boot_km$bootmean, 4))
+```
+
+**Interpretasi:**
+Uji stabilitas dengan 100 iterasi bootstrap menghasilkan nilai Jaccard rata-rata per cluster sebagai berikut:
+
+| Cluster | Jaccard |
+|---------|---------|
+| 1       | 0.9562  |
+| 2       | 0.8858  |
+| 3       | 0.9177  |
+
+Ketiga cluster memiliki nilai Jaccard **di atas 0.85**, yang merupakan ambang batas stabilitas tinggi. Ini berarti komposisi cluster K-Means **sangat konsisten** saat data di-resample, menunjukkan bahwa struktur cluster yang terbentuk bukan artefak dari inisialisasi acak, melainkan pola yang benar-benar ada di dalam data.
+
+---
+
+# Evaluasi Metrik
+
+```{r evaluasi}
+dmat <- dist(X_scaled)
+
+sil_km  <- silhouette(km_result$cluster, dmat)
+sil_pam <- silhouette(pam_result$clustering, dmat)
+
+avg_sil_km  <- mean(sil_km[, 3])
+avg_sil_pam <- mean(sil_pam[, 3])
+
+db_km  <- index.DB(X_scaled, km_result$cluster)$DB
+db_pam <- index.DB(X_scaled, pam_result$clustering)$DB
+
+ch_km  <- calinhara(X_scaled, km_result$cluster)
+ch_pam <- calinhara(X_scaled, pam_result$clustering)
+
+ari_km  <- adjustedRandIndex(seeds$variety, km_result$cluster)
+ari_pam <- adjustedRandIndex(seeds$variety, pam_result$clustering)
+```
+
+---
+
+# Tabel Perbandingan Metrik
+
+```{r tabel-metrik}
+hasil <- data.frame(
+  Metode = c("K-Means", "K-Medoids (PAM)"),
+  Silhouette = round(c(avg_sil_km, avg_sil_pam), 4),
+  Davies_Bouldin = round(c(db_km, db_pam), 4),
+  Calinski_Harabasz = round(c(ch_km, ch_pam), 2),
+  ARI = round(c(ari_km, ari_pam), 4),
+  Jaccard_Bootstrap = c(round(mean(boot_km$bootmean), 4), NA)
+)
+
+knitr::kable(
+  hasil,
+  caption = "Tabel 1. Perbandingan metrik evaluasi K-Means dan PAM",
+  align   = "lrrrrr"
+)
+```
+
+**Interpretasi:**
+
+| Metrik | K-Means | PAM | Lebih Baik | Keterangan |
+|--------|---------|-----|-----------|------------|
+| Silhouette | **0.4007** | 0.3982 | K-Means | Kohesi & separasi cluster sedikit lebih baik |
+| Davies-Bouldin | **1.0047** | 1.0115 | K-Means | Cluster lebih kompak dan terpisah |
+| Calinski-Harabasz | **249.78** | 247.33 | K-Means | Rasio variansi antar/dalam cluster lebih tinggi |
+| ARI | **0.7733** | 0.7470 | K-Means | Kesesuaian dengan label asli lebih tinggi |
+| Jaccard Bootstrap | **0.9199** |  | K-Means | Cluster sangat stabil |
+
+Secara keseluruhan, K-Means **unggul di semua metrik** meskipun selisihnya kecil. Nilai ARI K-Means sebesar 0.77 menunjukkan kesesuaian yang cukup tinggi dengan label varietas asli, mengindikasikan bahwa fitur morfologis biji gandum memang mengandung informasi diskriminatif antar varietas.
+
+---
+
+# Silhouette Plot
+
+```{r sil-plot, fig.width=11, fig.height=5, fig.cap="Gambar 5. Silhouette plot K-Means (kiri) dan PAM (kanan)."}
+par(mfrow = c(1, 2))
+plot(sil_km,  main = "Silhouette Plot K-Means", border = NA)
+plot(sil_pam, main = "Silhouette Plot PAM",     border = NA)
+par(mfrow = c(1, 1))
+```
+
+**Interpretasi:**
+Pada K-Means, silhouette per cluster adalah: C1=0.47, C2=0.34, C3=0.40. Cluster 1 memiliki separasi terbaik, sementara Cluster 2 adalah yang paling lemah, konsisten dengan zona overlap yang terlihat di plot PCA. Tidak ada nilai silhouette negatif yang berarti, sehingga tidak ada observasi yang secara tegas salah ditempatkan.
+
+Pada PAM, distribusi nilai silhouette per cluster adalah: C1=0.30, C2=0.50, C3=0.42. Cluster 2 PAM justru memiliki nilai silhouette tertinggi, namun Cluster 1 paling lemah (0.30). Rata-rata keduanya setara (~0.40), namun K-Means menunjukkan distribusi yang lebih **merata antar cluster**.
+
+---
+
+# Profil Cluster
+
+```{r profil-km}
+cluster_profile_km <- aggregate(X, by = list(Cluster = km_result$cluster), FUN = mean)
+cat("\nPROFIL CLUSTER K-MEANS\n")
+knitr::kable(cluster_profile_km, caption = "Tabel 2. Rata-rata fitur per cluster (K-Means)", digits = 3)
+```
+
+```{r profil-pam}
+cluster_profile_pam <- aggregate(X, by = list(Cluster = pam_result$clustering), FUN = mean)
+cat("\nPROFIL CLUSTER PAM\n")
+knitr::kable(cluster_profile_pam, caption = "Tabel 3. Rata-rata fitur per cluster (PAM)", digits = 3)
+```
+
+**Interpretasi (K-Means):**
+
+| Cluster | Karakteristik Dominan | Identifikasi |
+|---------|----------------------|-------------|
+| **C1** | Area (18.5), perimeter (16.2), groove_length (6.0) besar | Biji **besar** Varietas Rosa |
+| **C2** | Nilai sedang di semua fitur | Biji **sedang** Varietas Kama |
+| **C3** | Area kecil (11.9), asymmetry_coef tinggi (4.7) | Biji **kecil & asimetris** Varietas Canadian |
+
+Profil PAM menghasilkan karakteristik yang sangat serupa, hanya berbeda pada penomoran cluster. Cluster berukuran besar, sedang, dan kecil dapat diidentifikasi dengan jelas dari kedua metode.
+
+---
+
+# Heatmap Profil Cluster
+
+```{r heatmap-km, fig.cap="Gambar 6. Heatmap profil cluster K-Means (nilai terstandarisasi)."}
+profile_km_scaled <- aggregate(X_scaled, by = list(Cluster = km_result$cluster), FUN = mean)
+rownames(profile_km_scaled) <- paste("Cluster", profile_km_scaled$Cluster)
+profile_km_scaled <- profile_km_scaled[, -1]
+pheatmap(profile_km_scaled, main = "Cluster Profile Heatmap - K-Means")
+```
+
+```{r heatmap-pam, fig.cap="Gambar 7. Heatmap profil cluster PAM (nilai terstandarisasi)."}
+profile_pam_scaled <- aggregate(X_scaled, by = list(Cluster = pam_result$clustering), FUN = mean)
+rownames(profile_pam_scaled) <- paste("Cluster", profile_pam_scaled$Cluster)
+profile_pam_scaled <- profile_pam_scaled[, -1]
+pheatmap(profile_pam_scaled, main = "Cluster Profile Heatmap - PAM")
+```
+
+**Interpretasi:**
+Heatmap mengkonfirmasi pola profil cluster dari tabel sebelumnya dalam format visual. Warna **merah** menunjukkan nilai di atas rata-rata dan warna **biru** menunjukkan nilai di bawah rata-rata. Pola dendogram yang identik antara K-Means dan PAM menunjukkan bahwa kedua algoritma mengidentifikasi **struktur hierarki yang sama** dalam data: Cluster besar dan sedang lebih mirip satu sama lain dibanding dengan cluster kecil, terutama pada fitur dimensi fisik (area, perimeter, groove_length). Fitur `asymmetry_coef` adalah pembeda utama yang kontras terhadap cluster lainnya pada cluster biji kecil.
+
+---
+
+# Confusion Matrix
+
+```{r confusion-matrix}
+cat("\nCONFUSION MATRIX K-MEANS\n")
+cm_km <- table(Actual = seeds$variety, Cluster = km_result$cluster)
+print(cm_km)
+
+cat("\nCONFUSION MATRIX PAM\n")
+cm_pam <- table(Actual = seeds$variety, Cluster = pam_result$clustering)
+print(cm_pam)
+```
+
+**Interpretasi (K-Means):**
+Dari confusion matrix, dapat dihitung akurasi pengklasteran (setelah penyelarasan label):
+
+- **Varietas 1 - Cluster 2**: 62 dari 70 benar (89%), 6 salah ke C3, 2 ke C1
+- **Varietas 2 - Cluster 1**: 65 dari 70 benar (93%), 5 salah ke C2
+- **Varietas 3 - Cluster 3**: 66 dari 70 benar (94%), 4 salah ke C2
+
+Kesalahan klasifikasi terbanyak terjadi antara Varietas 1 dan 2, konsisten dengan zona tumpang tindih yang terlihat di plot PCA.
+
+**Interpretasi (PAM):**
+- **Varietas 1 - Cluster 1**: 64 dari 70 benar (91%)
+- **Varietas 2 - Cluster 2**: 61 dari 70 benar (87%)
+- **Varietas 3 - Cluster 3**: 66 dari 70 benar (94%)
+
+PAM sedikit lebih lemah dalam memisahkan Varietas 2, namun lebih baik dalam memisahkan Varietas 1, dibanding K-Means.
+
+---
+
+# Grafik Perbandingan Metrik
+
+```{r grafik-metrik, fig.cap="Gambar 8. Perbandingan nilai Silhouette dan ARI antara K-Means dan PAM."}
+metric_plot <- hasil[, c("Metode", "Silhouette", "ARI")]
+metric_plot <- pivot_longer(metric_plot, cols = c(Silhouette, ARI),
+                            names_to = "Metric", values_to = "Value")
+
+ggplot(metric_plot, aes(x = Metric, y = Value, fill = Metode)) +
+  geom_col(position = "dodge") +
+  labs(title = "Perbandingan K-Means vs PAM",
+       x = NULL, y = "Nilai Metrik") +
+  theme_minimal()
+```
+
+**Interpretasi:**
+Grafik batang memperjelas bahwa K-Means secara konsisten menghasilkan nilai yang lebih tinggi pada kedua metrik. Selisih ARI (~0.026) lebih besar secara relatif dibanding selisih Silhouette (~0.002), menunjukkan bahwa K-Means memiliki **kesesuaian lebih baik dengan label asli** bukan hanya struktur internal cluster yang lebih baik.
+
+---
+
+# Kesimpulan
+
+```{r kesimpulan}
+best_sil <- ifelse(avg_sil_km > avg_sil_pam, "K-Means", "PAM")
+best_db  <- ifelse(db_km < db_pam,           "K-Means", "PAM")
+best_ch  <- ifelse(ch_km > ch_pam,           "K-Means", "PAM")
+best_ari <- ifelse(ari_km > ari_pam,         "K-Means", "PAM")
+votes    <- c(best_sil, best_db, best_ch, best_ari)
+winner   <- names(sort(table(votes), decreasing = TRUE))[1]
+
+cat("Silhouette        :", best_sil, "\n")
+cat("Davies-Bouldin    :", best_db,  "\n")
+cat("Calinski-Harabasz :", best_ch,  "\n")
+cat("ARI               :", best_ari, "\n")
+cat("\nMetode terbaik secara keseluruhan:", winner, "\n")
+```
+
+Berdasarkan analisis clustering pada dataset Seeds dengan 210 sampel dan 7 fitur morfologis biji gandum, dapat disimpulkan:
+
+1. **Jumlah cluster optimal adalah K=3**, didukung oleh Elbow Method dan selaras dengan struktur data tiga varietas (*Kama, Rosa, Canadian*).
+
+2. **K-Means unggul di semua metrik evaluasi** dengan Silhouette (0.4007 vs 0.3982), Davies-Bouldin (1.0047 vs 1.0115), Calinski-Harabasz (249.78 vs 247.33), dan ARI (0.7733 vs 0.7470). Meskipun selisihnya kecil, K-Means secara konsisten memberikan hasil yang lebih baik.
+
+3. **K-Means sangat stabil** dengan nilai Jaccard Bootstrap rata-rata 0.9199 (>0.85), menunjukkan cluster yang terbentuk bukan hasil kebetulan inisialisasi.
+
+4. **Kedua metode berhasil mengidentifikasi tiga kelompok morfologis**: biji besar (dominan Varietas Rosa), biji sedang (dominan Varietas Kama), dan biji kecil dengan asimetri tinggi (dominan Varietas Canadian). Kesalahan klasifikasi terjadi terutama di zona tumpang tindih antara Varietas 1 dan 2.
+
+5. **K-Means direkomendasikan** sebagai metode clustering untuk dataset ini, mengingat keunggulan di semua dimensi evaluasi dan kestabilannya yang tinggi.
+
+---
